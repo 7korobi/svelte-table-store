@@ -74,7 +74,9 @@ type Foreign<A> = { [id: string]: A };
 type Foreigns<A, B> = {
 	[key: string]: [Foreign<A>, Foreign<B>];
 };
-type ForeignsList<B> = [Foreigns<B, any>] | [Foreigns<B, any>, Foreigns<any, B>, ...Foreigns<any, any>[]];
+type ForeignsList<B> =
+	| [Foreigns<B, any>]
+	| [Foreigns<B, any>, Foreigns<any, B>, ...Foreigns<any, any>[]];
 type RelArgs<B> = [RelArg<B>, ...RelArg<any>[]];
 type RelArg<A> = [a: TableReadable<A>, fk?: PKFK<A>, pk?: PKFK<A>];
 
@@ -91,7 +93,6 @@ export function table<T>(finder: Finder<T>, data: T[]) {
 export function relation<A>(...args: RelArg<A>) {
 	return relationWritable<A, A>([{}], [args]);
 }
-
 
 function writableTable<T>(
 	finder: Finder<T>,
@@ -321,7 +322,6 @@ function writableTable<T>(
 	}
 }
 
-
 function writableReduce<T, R, TOOL>(
 	[finder, baseChildren, baseIdx, list, find, query]: Entagle<T>,
 	mapper: IMapper<T, R, Tools<TOOL>>,
@@ -480,7 +480,6 @@ function writableReduce<T, R, TOOL>(
 	}
 }
 
-
 function relationWritable<A, B>(binds: ForeignsList<B>, rules: RelArgs<B>) {
 	const [bind, bindB] = binds;
 	const [rule] = rules;
@@ -494,9 +493,8 @@ function relationWritable<A, B>(binds: ForeignsList<B>, rules: RelArgs<B>) {
 	const idx = `${baseIdx}:${toPK?.key || ''}:${toFK?.key || ''}`;
 
 	const subscribers = new Set<SubscribeSet<(...data: A[]) => B[]>>();
-	set(list)
+	set(list);
 	children[idx] = { set, add, delBy };
-
 
 	return { idx, to, order };
 
@@ -565,7 +563,7 @@ function relationWritable<A, B>(binds: ForeignsList<B>, rules: RelArgs<B>) {
 	}
 
 	function map(...data: A[]): B[] {
-		console.log({data, binds, rules})
+		// console.log({ data, binds, rules });
 		let idx = rules.length;
 		let result: B[] = data as any;
 
