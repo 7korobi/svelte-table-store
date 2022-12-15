@@ -1,4 +1,5 @@
-import type { ID, MapReduceContext, Orderable } from './table';
+import type { MapReduceContext } from './table';
+import { spliceAt, type ID, type Orderable } from './util';
 
 const quantileDic = {
 	max: 1,
@@ -7,65 +8,16 @@ const quantileDic = {
 	median: 1 / 2
 };
 
-// バイナリサーチ
-function spliceAt0<X extends Orderable, T>(list: [X, T, ID][], b: X) {
-	let head = 0;
-	let tail = list.length;
-
-	if (undefined === b) return tail;
-
-	while (head < tail) {
-		const idx = (head + tail) >>> 1;
-
-		const a = list[idx][0];
-		if (undefined === a) {
-			tail = idx;
-			continue;
-		}
-		if (b < a) {
-			tail = idx;
-			continue;
-		}
-		if (a < b) {
-			head = idx + 1;
-			continue;
-		}
-		return idx + 1;
-	}
-	return head;
-}
-
-function spliceAtX<X extends Orderable, T>(list: X[], b: X) {
-	let head = 0;
-	let tail = list.length;
-
-	if (undefined === b) return tail;
-
-	while (head < tail) {
-		const idx = (head + tail) >>> 1;
-
-		const a = list[idx];
-		if (undefined === a) {
-			tail = idx;
-			continue;
-		}
-		if (b < a) {
-			tail = idx;
-			continue;
-		}
-		if (a < b) {
-			head = idx + 1;
-			continue;
-		}
-		return idx + 1;
-	}
-	return head;
-}
+const quantileCache = {} as { [key: string]: [string, number][] };
 
 function toIdx(value: number): number {
 	const low = Math.floor(value);
 	const high = Math.ceil(value);
 	return high - value < value - low ? high : low;
+}
+
+function standard(this: any, data: number) {
+	return (data - this.avg) / this.sd;
 }
 
 export function BasicTools<T>(context: <G>(key: string) => MapReduceContext<T, G>) {
@@ -139,49 +91,54 @@ export function BasicTools<T>(context: <G>(key: string) => MapReduceContext<T, G
 	}
 
 	function QUANTILE<AT extends string>(...ats: readonly AT[]) {
-		const idxs: [AT, number][] = ats.map((x) => {
-			const val = quantileDic[x as keyof typeof quantileDic];
-			if (undefined !== val) return [x, val];
-			let [c, m] = x.split('/').map(Number);
-			return m ? [x, c / m] : [x, c];
-		});
-		return function QUANTILE<X extends Orderable>(x: X) {
+		return QUANTILE;
+
+		function QUANTILE<X extends Orderable>(x: X) {
 			const [o, format, calc, add, del, local] = context<
 				{ [at in AT]: X } & { [at in `${AT}_is`]: T } & { [at in `${AT}_id`]: string }
 			>('QUANTILE');
-			const [c, item, itemId] = local<{ data: [X, T, ID][] }>();
+			const [c, item, itemId] = local<{ data: X[]; subdata: [T, ID][] }>();
 
 			format(() => {
 				c.data = [];
-				for (const [label, at] of idxs) {
-					o[label] = undefined as any;
+				c.subdata = [];
+				for (const [label] of idxs()) {
+					o[label as AT] = undefined as any;
 				}
 			});
 			add(() => {
-				const idx = spliceAt0(c.data, x);
-				const data: [X, T, ID] = [x, item, itemId];
-				c.data.splice(idx, 0, data);
+				const idx = spliceAt(c.data, x);
+				c.data.splice(idx, 0, x);
+				c.subdata.splice(idx, 0, [item, itemId]);
 			});
 			del(() => {
-				const idx = spliceAt0(c.data, x);
+				const idx = spliceAt(c.data, x);
 				c.data.splice(idx - 1, 1);
+				c.subdata.splice(idx - 1, 1);
 			});
 			calc(() => {
 				const tail = c.data.length - 1;
-				for (const [label, at] of idxs) {
+				for (const [label, at] of idxs()) {
 					const idx = toIdx(at * tail);
-					const [x, item, id] = c.data[idx];
+					const x = c.data[idx];
+					const [item, id] = c.subdata[idx];
 					(o as any)[label] = x;
 					(o as any)[`${label}_id`] = id;
 					(o as any)[`${label}_is`] = item;
 				}
 			});
 			return undefined as any as typeof o;
-		};
-	}
+		}
 
-	function standard(this: any, data: number) {
-		return (data - this.avg) / this.sd;
+		function idxs() {
+			const key = ats.toString();
+			return (quantileCache[key] ??= ats.map((x) => {
+				const val = quantileDic[x as keyof typeof quantileDic];
+				if (undefined !== val) return [x, val];
+				let [c, m] = x.split('/').map(Number);
+				return m ? [x, c / m] : [x, c];
+			}));
+		}
 	}
 
 	function VARIANCE(x: number, count = 1) {
@@ -206,14 +163,14 @@ export function BasicTools<T>(context: <G>(key: string) => MapReduceContext<T, G
 		});
 
 		add(() => {
-			const idx = spliceAtX(c.data, x);
+			const idx = spliceAt(c.data, x);
 			c.data.splice(idx, 0, x);
 			o.sum += x;
 			o.count += count;
 		});
 
 		del(() => {
-			const idx = spliceAtX(c.data, x);
+			const idx = spliceAt(c.data, x);
 			c.data.splice(idx - 1, 1);
 			o.sum -= x;
 			o.count -= count;

@@ -1,12 +1,13 @@
 import type { Readable, Subscriber, Unsubscriber } from 'svelte/store';
 import { BasicTools } from './reduce-tools.js';
-
-export type Orderable = Date | bigint | number | string | boolean;
-export type ID = bigint | number | string | boolean;
+import { setKey, spliceAt, type ID, type Orderable } from './util.js';
 
 type HasKey<T> = { key?: string } & T;
 type IQuery<T> = HasKey<(item: T) => boolean>;
-type IOrder<T> = HasKey<(item: T) => Orderable[] | Orderable>;
+type IOrder<T> = HasKey<(item: T) => SortKey>;
+type PKFK<T> = HasKey<(a: T) => (ID | undefined)[]>;
+
+type SortKey = Orderable[] | Orderable;
 
 type SubscribeSet<T> = readonly [run: Subscriber<T>, invalidate: (value?: T) => void];
 
@@ -16,7 +17,14 @@ type TablePipe<T> = {
 	delBy(ids: ID[]): void;
 };
 
-type Entagle<T> = [Finder<T>, TableChildren<T>, string, T[] & TableExtra<T>, IQuery<T>?];
+type Entagle<T> = [
+	Finder<T>,
+	TableChildren<T>,
+	string,
+	T[] & TableExtra<T>,
+	(key: ID) => T | undefined,
+	IQuery<T>?
+];
 
 type TableExtra<T> = {
 	orderType: boolean;
@@ -28,8 +36,6 @@ type TableChildren<T> = { [idx in string]: TablePipe<T> };
 type TableWritable<T> = TablePipe<T> &
 	TableReadable<T> & {
 		toReader(): TableReadable<T>;
-
-		entagle(): Entagle<T>;
 	};
 type TableReadable<T> = Readable<T[] & TableExtra<T>> & {
 	shuffle(): TableReadable<T>;
@@ -42,6 +48,7 @@ type TableReadable<T> = Readable<T[] & TableExtra<T>> & {
 	): MapReduceReadable<R>;
 
 	idx: string;
+	entagle(): Entagle<T>;
 };
 
 type GroupTool = <K extends string, G>(key: K, cb: () => G) => { [idx in K]: G };
@@ -63,89 +70,15 @@ type MapReduceReadable<R> = Readable<R> & {
 	idx: string;
 };
 
+type Foreign<A> = { [id: string]: A };
+type Foreigns<A, B> = {
+	[key: string]: [Foreign<A>, Foreign<B>];
+};
+type ForeignsList<B> = [Foreigns<B, any>] | [Foreigns<B, any>, Foreigns<any, B>, ...Foreigns<any, any>[]];
+type RelArgs<B> = [RelArg<B>, ...RelArg<any>[]];
+type RelArg<A> = [a: TableReadable<A>, fk?: PKFK<A>, pk?: PKFK<A>];
+
 function nop() {}
-
-function subKey(oldIt: HasKey<any>, newIt: HasKey<any>, key?: string) {
-	let result = '';
-
-	if (newIt) {
-		result = key || newIt.key || newIt.toString();
-		newIt.key = result;
-	}
-}
-
-function spliceAt(orderType: boolean, sortKeys: Orderable[][], itemKey: Orderable[]) {
-	// バイナリサーチ
-	if (orderType) {
-		// desc list scan.
-		let head = 0;
-		let tail = sortKeys.length;
-
-		while (head < tail) {
-			let sortIdx = itemKey.length;
-			while (sortIdx--) {
-				const idx = (head + tail) >>> 1;
-				const b = itemKey[sortIdx];
-				if (undefined === b) {
-					head = idx + 1;
-					break;
-				}
-				const a = sortKeys[idx][sortIdx];
-				if (undefined === a) {
-					tail = idx;
-					break;
-				}
-				if (b > a) {
-					tail = idx;
-					break;
-				}
-				if (a > b) {
-					head = idx + 1;
-					break;
-				}
-				if (sortIdx) {
-					continue;
-				}
-				return idx + 1;
-			}
-		}
-		return head;
-	} else {
-		// asc list scan.
-		let head = 0;
-		let tail = sortKeys.length;
-
-		while (head < tail) {
-			let sortIdx = itemKey.length;
-			while (sortIdx--) {
-				const idx = (head + tail) >>> 1;
-				const b = itemKey[sortIdx];
-				if (undefined === b) {
-					head = idx + 1;
-					break;
-				}
-				const a = sortKeys[idx][sortIdx];
-				if (undefined === a) {
-					tail = idx;
-					break;
-				}
-				if (b < a) {
-					tail = idx;
-					break;
-				}
-				if (a < b) {
-					head = idx + 1;
-					break;
-				}
-				if (sortIdx) {
-					continue;
-				}
-				return idx + 1;
-			}
-		}
-		return head;
-	}
-}
 
 type Finder<A> = (a: A) => ID;
 
@@ -154,6 +87,11 @@ export function table<T>(finder: Finder<T>, data: T[]) {
 	writable.set(data);
 	return writable;
 }
+
+export function relation<A>(...args: RelArg<A>) {
+	return relationWritable<A, A>([{}], [args]);
+}
+
 
 function writableTable<T>(
 	finder: Finder<T>,
@@ -168,7 +106,7 @@ function writableTable<T>(
 	const baseIdx = idx;
 	const baseChildren = children;
 
-	const sortKeys: Orderable[][] = [];
+	const sortKeys: SortKey[] = [];
 	const list: T[] & TableExtra<T> = [] as any;
 	list.where = query?.key;
 	list.order = sort?.key;
@@ -283,16 +221,60 @@ function writableTable<T>(
 
 	// private section.
 	function toChild(w: TableWritable<T>): TableReadable<T> {
+		const { idx, set, toReader } = w;
 		if (children[idx]) return children[idx] as TableWritable<T>;
 
-		w.set(list);
+		set(list);
 		children[idx] = w;
-		return w.toReader();
+		return toReader();
 	}
 
-	// Foreign section.
+	// Writable section.
+	function toReader() {
+		return { idx, subscribe, shuffle, where, order, reduce, entagle };
+	}
+
+	function reduce<R, TOOL>(
+		mapper: IMapper<T, R, Tools<TOOL>>,
+		key = undefined,
+		customTools: (context: <G>(key: string) => MapReduceContext<T, G>) => TOOL = () => {
+			return {} as TOOL;
+		}
+	) {
+		setKey(mapper, key);
+		return writableReduce<T, R, TOOL>(entagle(), mapper, customTools);
+	}
+
 	function entagle(): Entagle<T> {
-		return [finder, baseChildren, baseIdx, list, query];
+		return [finder, baseChildren, baseIdx, list, find, query];
+	}
+
+	// Writable private section.
+	function publish() {
+		// skip if stop.
+		for (const [publishTo, invalidate] of subscribers) {
+			invalidate();
+			publishTo(list);
+		}
+	}
+
+	function itemAdd(item: T) {
+		const id = finder(item) as string;
+		if (findAt[id]) {
+			const idx = list.indexOf(findAt[id]);
+			delete findAt[id];
+			list.splice(idx, 1);
+			if (sort) sortKeys.splice(idx, 1);
+		}
+		findAt[id] = item;
+		if (sort) {
+			const itemKey = sort(item);
+			const idx = spliceAt(sortKeys as any, itemKey as any, orderType);
+			sortKeys.splice(idx, 0, itemKey);
+			list.splice(idx, 0, item);
+		} else {
+			list.push(item);
+		}
 	}
 
 	// Readable section.
@@ -327,66 +309,21 @@ function writableTable<T>(
 	}
 
 	function where(newQuery: IQuery<T> | undefined, key = undefined) {
-		subKey(query, newQuery, key);
+		setKey(newQuery, key);
 		return toChild(writableTable<T>(finder, children, orderType, newQuery, sort));
 	}
 
 	function order(newSort: IOrder<T> | undefined, key = undefined) {
-		subKey(sort, newSort, key);
+		setKey(newSort, key);
 		const isSame = !sort || !newSort || sort.key === newSort.key;
 		const newOrderType = isSame ? !orderType : true;
 		return toChild(writableTable<T>(finder, children, newOrderType, query, newSort));
 	}
-
-	// Writable private section.
-	function publish() {
-		// skip if stop.
-		for (const [publishTo, invalidate] of subscribers) {
-			invalidate();
-			publishTo(list);
-		}
-	}
-
-	function itemAdd(item: T) {
-		const id = finder(item) as string;
-		if (findAt[id]) {
-			const idx = list.indexOf(findAt[id]);
-			delete findAt[id];
-			list.splice(idx, 1);
-			if (sort) sortKeys.splice(idx, 1);
-		}
-		findAt[id] = item;
-		if (sort) {
-			const itemKeyBase = sort(item);
-			const itemKey: Orderable[] =
-				itemKeyBase instanceof Array ? itemKeyBase.reverse() : [itemKeyBase];
-			const idx = spliceAt(orderType, sortKeys, itemKey);
-			sortKeys.splice(idx, 0, itemKey);
-			list.splice(idx, 0, item);
-		} else {
-			list.push(item);
-		}
-	}
-
-	// Writable section.
-	function toReader() {
-		return { idx, subscribe, shuffle, where, order, reduce, entagle };
-	}
-
-	function reduce<R, TOOL>(
-		mapper: IMapper<T, R, Tools<TOOL>>,
-		key = undefined,
-		customTools: (context: <G>(key: string) => MapReduceContext<T, G>) => TOOL = () => {
-			return {} as TOOL;
-		}
-	) {
-		subKey(undefined, mapper, key);
-		return writableReduce<T, R, TOOL>(entagle(), mapper, customTools);
-	}
 }
 
+
 function writableReduce<T, R, TOOL>(
-	[finder, baseChildren, baseIdx, list, query]: Entagle<T>,
+	[finder, baseChildren, baseIdx, list, find, query]: Entagle<T>,
 	mapper: IMapper<T, R, Tools<TOOL>>,
 	customTools: (context: <G>(key: string) => MapReduceContext<T, G>) => TOOL
 ) {
@@ -431,6 +368,69 @@ function writableReduce<T, R, TOOL>(
 	set(list);
 	children[idx] = { idx, subscribe, set, add, delBy };
 	return { idx, subscribe } as MapReduceReadable<R>;
+
+	// Writable section for MapReduce
+	function set(data: T[]) {
+		if (query) data = data.filter(query);
+
+		for (const cb of Object.values(inits)) {
+			cb();
+		}
+
+		data.forEach(itemAdd);
+		publish();
+	}
+
+	function add(data: T[]) {
+		if (query) data = data.filter(query);
+
+		data.forEach(itemAdd);
+		publish();
+	}
+
+	function delBy(ids: ID[]) {
+		for (const id of ids) {
+			for (const cb of Object.values(delAts[id as string])) {
+				cb();
+			}
+		}
+		publish();
+	}
+
+	// Writable private section for MapReduce.
+	function publish() {
+		for (const cb of Object.values(calcs)) {
+			cb();
+		}
+
+		// skip if stop.
+		for (const [publishTo, invalidate] of subscribers) {
+			invalidate();
+			publishTo(result);
+		}
+	}
+
+	function itemAdd(o: T) {
+		item = o;
+		itemId = finder(item) as string;
+		groupIdx = '';
+		localIdx = 0;
+
+		const dels = delAts[itemId];
+		addAts[itemId] = {};
+		delAts[itemId] = {};
+		mapper(item, itemId, tools);
+
+		if (dels) {
+			for (const cb of Object.values(dels)) {
+				cb();
+			}
+		}
+
+		for (const cb of Object.values(addAts[itemId])) {
+			cb();
+		}
+	}
 
 	// Mapper section for MapReduce
 	function context<G>(ctxIdx: string): MapReduceContext<T, G> {
@@ -478,66 +478,175 @@ function writableReduce<T, R, TOOL>(
 			}
 		};
 	}
-	// Writable private section for MapReduce.
-	function publish() {
-		for (const cb of Object.values(calcs)) {
-			cb();
-		}
+}
 
+
+function relationWritable<A, B>(binds: ForeignsList<B>, rules: RelArgs<B>) {
+	const [bind, bindB] = binds;
+	const [rule] = rules;
+	const [finder, children, baseIdx, list, find, query] = rule[0].entagle();
+	const basePK: PKFK<B> = (a) => [finder(a)];
+	const [B, toFK, toPK = basePK] = rule;
+	rule[2] = toPK;
+
+	setKey(toPK);
+	setKey(toFK);
+	const idx = `${baseIdx}:${toPK?.key || ''}:${toFK?.key || ''}`;
+
+	const subscribers = new Set<SubscribeSet<(...data: A[]) => B[]>>();
+	set(list)
+	children[idx] = { set, add, delBy };
+
+
+	return { idx, to, order };
+
+	function set(data: B[]) {
+		for (const key of Object.keys(bind)) {
+			bind[key][0] = {};
+			if (bindB) bindB[key][1] = {};
+		}
+		add(data);
+	}
+
+	function add(data: B[]) {
+		if (query) data = data.filter(query);
+
+		for (const a of data) {
+			const id = finder(a) as string;
+
+			if (bind && toPK)
+				for (const pk of toPK(a)) {
+					if (undefined === pk) continue;
+					bind[pk as string] ??= [{}, {}];
+					bind[pk as string][0][id] = a;
+				}
+
+			if (bindB && toPK && !toFK)
+				for (const pk of toPK(a)) {
+					if (undefined === pk) continue;
+					bindB[pk as string] ??= [{}, {}];
+					bindB[pk as string][1][id] = a;
+				}
+
+			if (bindB && toFK)
+				for (const fk of toFK(a)) {
+					if (undefined === fk) continue;
+					bindB[fk as string] ??= [{}, {}];
+					bindB[fk as string][1][id] = a;
+				}
+		}
+		publish();
+	}
+
+	function delBy(ids: ID[]) {
+		for (const id of ids) {
+			const a = find(id);
+			if (!a) continue;
+
+			if (bind && toPK)
+				for (const pk of toPK(a)) {
+					if (undefined === pk) continue;
+					delete bind[pk as string][0][id as string];
+				}
+
+			if (bindB && toPK && !toFK)
+				for (const pk of toPK(a)) {
+					if (undefined === pk) continue;
+					delete bindB[pk as string][1][id as string];
+				}
+
+			if (bindB && toFK)
+				for (const fk of toFK(a)) {
+					if (undefined === fk) continue;
+					delete bindB[fk as string][1][id as string];
+				}
+		}
+		publish();
+	}
+
+	function map(...data: A[]): B[] {
+		console.log({data, binds, rules})
+		let idx = rules.length;
+		let result: B[] = data as any;
+
+		while (--idx) {
+			const bind = binds[idx];
+			const rule = rules[idx];
+			const [B, toFK, toPK] = rule;
+
+			result = [];
+			for (const item of data as any as B[]) {
+				if (!item) continue;
+				for (const pk of toPK!(item)) {
+					if (undefined === pk) continue;
+
+					const foreigns = bind[pk as string]?.[1];
+					if (!foreigns) continue;
+
+					for (const to of Object.values(foreigns)) {
+						result.push(to);
+					}
+				}
+			}
+			data = result as any;
+		}
+		return result as any as B[];
+	}
+
+	function publish() {
 		// skip if stop.
 		for (const [publishTo, invalidate] of subscribers) {
 			invalidate();
-			publishTo(result);
+			publishTo(map);
 		}
 	}
 
-	function itemAdd(o: T) {
-		item = o;
-		itemId = finder(item) as string;
-		groupIdx = '';
-		localIdx = 0;
+	function to<C>(...args: RelArg<C>) {
+		return relationWritable<A, C>([{}, ...binds] as ForeignsList<any>, [args, ...rules]);
+	}
 
-		const dels = delAts[itemId];
-		addAts[itemId] = {};
-		delAts[itemId] = {};
-		mapper(item, itemId, tools);
+	function order(newSort: IOrder<B> | undefined, key = undefined) {
+		setKey(newSort, key);
+		return toReader();
+	}
 
-		if (dels) {
-			for (const cb of Object.values(dels)) {
-				cb();
+	function toReader() {
+		return { idx, subscribe, reduce };
+	}
+
+	function reduce<R, TOOL>(
+		mapper: IMapper<B, R, Tools<TOOL>>,
+		key = undefined,
+		customTools: (context: <G>(key: string) => MapReduceContext<B, G>) => TOOL = () => {
+			return {} as TOOL;
+		}
+	) {
+		setKey(mapper, key);
+		return writableReduce<B, R, TOOL>(entagle(), mapper, customTools);
+	}
+
+	function entagle(): Entagle<B> {
+		return [finder, children, baseIdx, list, find, query];
+	}
+
+	// Readable section.
+	function subscribe(
+		run: (map: (...data: A[]) => B[]) => void,
+		invalidate: (value?: (...data: A[]) => B[]) => void = nop
+	): Unsubscriber {
+		const subscriber = [run, invalidate] as const;
+		subscribers.add(subscriber);
+		if (subscribers.size === 1) {
+			// do START. // stop = start(set)
+		}
+
+		run(map);
+
+		return () => {
+			subscribers.delete(subscriber);
+			if (subscribers.size === 0) {
+				// do STOP. // stop!(); stop = null;
 			}
-		}
-
-		for (const cb of Object.values(addAts[itemId])) {
-			cb();
-		}
-	}
-
-	// Writable section for MapReduce
-	function set(data: T[]) {
-		if (query) data = data.filter(query);
-
-		for (const cb of Object.values(inits)) {
-			cb();
-		}
-
-		data.forEach(itemAdd);
-		publish();
-	}
-
-	function add(data: T[]) {
-		if (query) data = data.filter(query);
-
-		data.forEach(itemAdd);
-		publish();
-	}
-
-	function delBy(ids: string[]) {
-		for (const id of ids) {
-			for (const cb of Object.values(delAts[id])) {
-				cb();
-			}
-		}
-		publish();
+		};
 	}
 }

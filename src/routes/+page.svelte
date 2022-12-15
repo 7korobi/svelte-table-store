@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { __BROWSER__ } from 'svelte-petit-utils';
-	import { table } from '$lib';
+	import { relation, table } from '$lib';
 
 	type A = { _id: number; name: string; b?: B; b_id?: number; c_id?: number };
 	type B = {
@@ -22,14 +22,26 @@
 
 	const C = table<C>(({ _id }) => _id, [{ _id: 4, name: 'よん' }]);
 
-	/*
-	const CtoA = relation(C)(A, (a)=>[a.c_id]).order((a)=> [a._id])
-	const BtoAtoC = relation(B)(A, (a)=>[a.b_id], (a)=>[a.c_id])(C).order((c)=> [c._id])
-	const children = relation(B)(B, (b)=>[b.parent_id]).order((b)=> [b._id])
+	const CtoA = relation(C)
+		.to(A, (a) => [a.c_id])
+		.order((a) => [a._id]);
+	const BtoAtoC = relation(B)
+		.to(
+			A,
+			(a) => [a.b_id],
+			(a) => [a.c_id]
+		)
+		.to(C)
+		.order((c) => [c._id]);
+	const children = relation(B)
+		.to(B, (b) => [b.parent_id])
+		.order((b) => [b._id]);
 
-	CtoA(c)
-	BtoAtoC(b1, b2)
-	children(...children(b3))
+	/*
+
+	$CtoA(c)
+	$BtoAtoC(b1, b2)
+	$children(...children(b3))
 
 	const asOfC = relation(C)(A, (a)=> [a.c_id]).order((a)=> a._id)
 	const asOfB = relation(B)(A, (a)=> [a.b_id]).order((a)=> a._id)
@@ -225,6 +237,8 @@
 <p>A : {JSON.stringify($A)}</p>
 <p>B : {JSON.stringify($B)}</p>
 <p>C : {JSON.stringify($C)}</p>
+<p>children : {JSON.stringify($children($B[1]))}</p>
+<p>BtoAtoC : {JSON.stringify($BtoAtoC($B[0]))}</p>
 
 {#each $names as item (item.id)}
 	<p>
