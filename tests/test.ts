@@ -14,8 +14,9 @@ const Family = table((o)=> o.name, [
 ]);
 
 const ChildrenBase = relation(Family).to(Family, (o)=>[o.father, o.mother])
-const DescendantLeaf = ChildrenBase.repeat('leaf').order((o)=>[o.father])
-const Descendants = ChildrenBase.repeat('all').order((o)=>[o.father])
+const DescendantNode = ChildrenBase.tree('node').order((o)=>[o.father])
+const DescendantLeaf = ChildrenBase.tree('leaf').order((o)=>[o.father])
+const Descendants = ChildrenBase.tree('all').order((o)=>[o.father])
 const Children = ChildrenBase.order((o)=>[o.father])
 
 test('family', async ({ page }) => {

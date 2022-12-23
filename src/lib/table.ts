@@ -492,7 +492,7 @@ function writableReduce<T, R, TOOL>(
 	}
 }
 
-function relationWritable<A, B>(binds: ForeignsList<B>, rules: RelArgs<B>, repeatMode?: 'all' | 'leaf') {
+function relationWritable<A, B>(binds: ForeignsList<B>, rules: RelArgs<B>, _tree?: 'all' | 'leaf' | 'node') {
 	const [bind, bindB] = binds;
 	const [rule] = rules;
 	const [finder, children, baseIdx, list, find, query] = rule[0].entagle();
@@ -509,7 +509,7 @@ function relationWritable<A, B>(binds: ForeignsList<B>, rules: RelArgs<B>, repea
 	set(list);
 	children[idx] = { set, add, delBy };
 
-	return { idx, to, repeat, order };
+	return { idx, to, tree, order };
 
 	function set(data: B[]) {
 		for (const key of Object.keys(bind)) {
@@ -603,22 +603,27 @@ function relationWritable<A, B>(binds: ForeignsList<B>, rules: RelArgs<B>, repea
 			}
 			data = result as any;
 		}
-		if ('all' === repeatMode) {
-			result.push(...map(...result as any[]))
-		}
-		if ('leaf' === repeatMode) {
-			const leafs = [] as B[]
-			for (const item of result){
-				const nextResult = map(item as any);
-				if (nextResult.length) {
-					leafs.push(...nextResult)
-				} else {
-					leafs.push(item)
-				}
+		if (!_tree) return result as B[];
+
+		const alls = [] as B[];
+		const nodes = [] as B[];
+		const leafs = [] as B[];
+		for (const item of result){
+			const nextResult = map(item as any);
+			if (nextResult.length) {
+				alls.push(item);
+				alls.push(...nextResult);
+				nodes.push(item);
+				leafs.push(...nextResult);
+			} else {
+				alls.push(item);
+				leafs.push(item);
 			}
-			return leafs;
 		}
-		return result as any as B[];
+		if ('all' === _tree) return alls;
+		if ('leaf' === _tree) return leafs;
+		if ('node' === _tree) return nodes;
+		return []
 	}
 
 	function publish() {
@@ -629,7 +634,7 @@ function relationWritable<A, B>(binds: ForeignsList<B>, rules: RelArgs<B>, repea
 		}
 	}
 
-	function repeat(mode?: 'all' | 'leaf') {
+	function tree(mode?: 'all' | 'leaf' | 'node') {
 		return relationWritable<A, B>(binds, rules, mode);
 	}
 
