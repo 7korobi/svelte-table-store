@@ -38,6 +38,7 @@ type TableWritable<T> = TablePipe<T> &
 		toReader(): TableReadable<T>;
 	};
 type TableReadable<T> = Readable<T[] & TableExtra<T>> & {
+	get(): T[] & TableExtra<T>;
 	shuffle(): TableReadable<T>;
 	where(query: IQuery<T>, key?: string): TableReadable<T>;
 	order(order: IOrder<T>, key?: string): TableReadable<T>;
@@ -67,6 +68,7 @@ export type MapReduceContext<T, G> = readonly [
 type MapReduceChildren<T, R> = { [idx in string]: MapReduceWritable<T, R> };
 type MapReduceWritable<T, R> = MapReduceReadable<R> & TablePipe<T>;
 type MapReduceReadable<R> = Readable<R> & {
+	get(): R;
 	idx: string;
 };
 
@@ -118,6 +120,7 @@ function writableTable<T>(
 
 	if (!query && !sort) {
 		return {
+			get,
 			subscribe,
 			shuffle,
 			where,
@@ -173,6 +176,7 @@ function writableTable<T>(
 		}
 	} else {
 		return {
+			get,
 			subscribe,
 			shuffle,
 			where,
@@ -232,7 +236,7 @@ function writableTable<T>(
 
 	// Writable section.
 	function toReader() {
-		return { idx, subscribe, shuffle, where, order, reduce, entagle };
+		return { idx, get, subscribe, shuffle, where, order, reduce, entagle };
 	}
 
 	function reduce<R, TOOL>(
@@ -279,6 +283,10 @@ function writableTable<T>(
 	}
 
 	// Readable section.
+	function get() {
+		return list;
+	}
+
 	function subscribe(
 		run: (list: T[] & TableExtra<T>) => void,
 		invalidate: (value?: T[] & TableExtra<T>) => void = nop
@@ -366,7 +374,7 @@ function writableReduce<T, R, TOOL>(
 	if (children[idx]) return children[idx] as MapReduceReadable<R>;
 
 	set(list);
-	children[idx] = { idx, subscribe, set, add, delBy };
+	children[idx] = { idx, subscribe, get, set, add, delBy };
 	return { idx, subscribe } as MapReduceReadable<R>;
 
 	// Writable section for MapReduce
@@ -459,6 +467,10 @@ function writableReduce<T, R, TOOL>(
 	}
 
 	// Readable section for MapReduce
+	function get() {
+		return result;
+	}
+
 	function subscribe(
 		run: (result: R) => void,
 		invalidate: (value?: R) => void = nop
@@ -480,7 +492,7 @@ function writableReduce<T, R, TOOL>(
 	}
 }
 
-function relationWritable<A, B>(binds: ForeignsList<B>, rules: RelArgs<B>) {
+function relationWritable<A, B>(binds: ForeignsList<B>, rules: RelArgs<B>, repeatMode?: 'all' | 'leaf') {
 	const [bind, bindB] = binds;
 	const [rule] = rules;
 	const [finder, children, baseIdx, list, find, query] = rule[0].entagle();
@@ -493,10 +505,11 @@ function relationWritable<A, B>(binds: ForeignsList<B>, rules: RelArgs<B>) {
 	const idx = `${baseIdx}:${toPK?.key || ''}:${toFK?.key || ''}`;
 
 	const subscribers = new Set<SubscribeSet<(...data: A[]) => B[]>>();
+
 	set(list);
 	children[idx] = { set, add, delBy };
 
-	return { idx, to, order };
+	return { idx, to, repeat, order };
 
 	function set(data: B[]) {
 		for (const key of Object.keys(bind)) {
@@ -563,6 +576,8 @@ function relationWritable<A, B>(binds: ForeignsList<B>, rules: RelArgs<B>) {
 	}
 
 	function map(...data: A[]): B[] {
+		if (!data.length) return [] as B[]
+
 		// console.log({ data, binds, rules });
 		let idx = rules.length;
 		let result: B[] = data as any;
@@ -588,6 +603,21 @@ function relationWritable<A, B>(binds: ForeignsList<B>, rules: RelArgs<B>) {
 			}
 			data = result as any;
 		}
+		if ('all' === repeatMode) {
+			result.push(...map(...result as any[]))
+		}
+		if ('leaf' === repeatMode) {
+			const leafs = [] as B[]
+			for (const item of result){
+				const nextResult = map(item as any);
+				if (nextResult.length) {
+					leafs.push(...nextResult)
+				} else {
+					leafs.push(item)
+				}
+			}
+			return leafs;
+		}
 		return result as any as B[];
 	}
 
@@ -597,6 +627,10 @@ function relationWritable<A, B>(binds: ForeignsList<B>, rules: RelArgs<B>) {
 			invalidate();
 			publishTo(map);
 		}
+	}
+
+	function repeat(mode?: 'all' | 'leaf') {
+		return relationWritable<A, B>(binds, rules, mode);
 	}
 
 	function to<C>(...args: RelArg<C>) {
@@ -609,7 +643,7 @@ function relationWritable<A, B>(binds: ForeignsList<B>, rules: RelArgs<B>) {
 	}
 
 	function toReader() {
-		return { idx, subscribe, reduce };
+		return { idx, get, subscribe, reduce };
 	}
 
 	function reduce<R, TOOL>(
@@ -628,6 +662,9 @@ function relationWritable<A, B>(binds: ForeignsList<B>, rules: RelArgs<B>) {
 	}
 
 	// Readable section.
+	function get() {
+		return map;
+	}
 	function subscribe(
 		run: (map: (...data: A[]) => B[]) => void,
 		invalidate: (value?: (...data: A[]) => B[]) => void = nop

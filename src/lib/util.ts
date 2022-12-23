@@ -1,4 +1,4 @@
-export type Orderable = Date | bigint | number | string | boolean;
+export type Orderable = Date | bigint | number | string | boolean | undefined;
 export type ID = bigint | number | string | boolean;
 
 type HasKey<T> = { key?: string } & T;

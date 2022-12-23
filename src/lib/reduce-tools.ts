@@ -1,5 +1,5 @@
-import type { MapReduceContext } from './table';
-import { spliceAt, type ID, type Orderable } from './util';
+import type { MapReduceContext } from './table.js';
+import { spliceAt, type ID, type Orderable } from './util.js';
 
 const quantileDic = {
 	max: 1,
