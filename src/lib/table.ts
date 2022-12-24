@@ -66,7 +66,10 @@ export type MapReduceContext<T, G> = readonly [
 	<C>() => [C, T, ID]
 ];
 type MapReduceChildren<T, R> = { [idx in string]: MapReduceWritable<T, R> };
-type MapReduceWritable<T, R> = MapReduceReadable<R> & TablePipe<T>;
+type MapReduceWritable<T, R> = TablePipe<T> &
+	MapReduceReadable<R> & {
+		toReader(): MapReduceReadable<R>;
+	};
 type MapReduceReadable<R> = Readable<R> & {
 	get(): R;
 	idx: string;
@@ -93,7 +96,7 @@ export function table<T>(finder: Finder<T>, data: T[]) {
 }
 
 export function relation<A>(...args: RelArg<A>) {
-	return relationWritable<A, A>([{}], [args]);
+	return relationWritable<A, A>([{}], [args], undefined);
 }
 
 function writableTable<T>(
@@ -226,12 +229,14 @@ function writableTable<T>(
 
 	// private section.
 	function toChild(w: TableWritable<T>): TableReadable<T> {
-		const { idx, set, toReader } = w;
-		if (children[idx]) return children[idx] as TableWritable<T>;
-
-		set(list);
-		children[idx] = w;
-		return toReader();
+		const { idx } = w;
+		if (children[idx]) {
+			w = children[idx] as typeof w;
+		} else {
+			w.set(list);
+			children[idx] = w;
+		}
+		return w.toReader();
 	}
 
 	// Writable section.
@@ -370,14 +375,25 @@ function writableReduce<T, R, TOOL>(
 		}
 	};
 
-	// toChild
-	if (children[idx]) return children[idx] as MapReduceReadable<R>;
+	return toChild({ idx, subscribe, get, set, add, delBy, toReader });
 
-	set(list);
-	children[idx] = { idx, subscribe, get, set, add, delBy };
-	return { idx, subscribe } as MapReduceReadable<R>;
+	// private section.
+	function toChild(w: MapReduceWritable<T, R>): MapReduceReadable<R> {
+		const { idx } = w;
+		if (children[idx]) {
+			w = children[idx] as typeof w;
+		} else {
+			w.set(list);
+			children[idx] = w;
+		}
+		return w.toReader();
+	}
 
 	// Writable section for MapReduce
+	function toReader(): MapReduceReadable<R> {
+		return { idx, get, subscribe };
+	}
+
 	function set(data: T[]) {
 		if (query) data = data.filter(query);
 
@@ -492,7 +508,11 @@ function writableReduce<T, R, TOOL>(
 	}
 }
 
-function relationWritable<A, B>(binds: ForeignsList<B>, rules: RelArgs<B>, _tree?: 'all' | 'leaf' | 'node') {
+function relationWritable<A, B>(
+	binds: ForeignsList<B>,
+	rules: RelArgs<B>,
+	_tree?: 'all' | 'leaf' | 'node'
+) {
 	const [bind, bindB] = binds;
 	const [rule] = rules;
 	const [finder, children, baseIdx, list, find, query] = rule[0].entagle();
@@ -502,14 +522,25 @@ function relationWritable<A, B>(binds: ForeignsList<B>, rules: RelArgs<B>, _tree
 
 	setKey(toPK);
 	setKey(toFK);
-	const idx = `${baseIdx}:${toPK?.key || ''}:${toFK?.key || ''}`;
+	const idx = rules.map(([B, toFK, toPK])=>`${B.entagle()[2]};${toPK?.key || ''};${toFK?.key || ''}`).join(';') + `;${_tree || ""}`;
 
 	const subscribers = new Set<SubscribeSet<(...data: A[]) => B[]>>();
 
-	set(list);
-	children[idx] = { set, add, delBy };
+	let w = { set, add, delBy, toRelation };
+	if (children[idx]) {
+		w = children[idx] as typeof w;
+	} else {
+		console.log(children)	
+		if (!_tree) {
+			set(list);
+			(children[idx] as typeof w) = w;
+		}
+	}
+	return w.toRelation();
 
-	return { idx, to, tree, order };
+	function toRelation() {
+		return { idx, to, tree, order };
+	}
 
 	function set(data: B[]) {
 		for (const key of Object.keys(bind)) {
@@ -576,55 +607,63 @@ function relationWritable<A, B>(binds: ForeignsList<B>, rules: RelArgs<B>, _tree
 	}
 
 	function map(...data: A[]): B[] {
-		if (!data.length) return [] as B[]
+		if (_tree) {
+			const alls: B[] = [];
+			const nodes: B[] = [];
+			const leafs: B[] = [];
+			treeStep(forward(data) as any);
 
-		// console.log({ data, binds, rules });
-		let idx = rules.length;
-		let result: B[] = data as any;
+			if ('all' === _tree) return alls;
+			if ('leaf' === _tree) return leafs;
+			if ('node' === _tree) return nodes;
+			return [];
 
-		while (--idx) {
-			const bind = binds[idx];
-			const rule = rules[idx];
-			const [B, toFK, toPK] = rule;
-
-			result = [];
-			for (const item of data as any as B[]) {
-				if (!item) continue;
-				for (const pk of toPK!(item)) {
-					if (undefined === pk) continue;
-
-					const foreigns = bind[pk as string]?.[1];
-					if (!foreigns) continue;
-
-					for (const to of Object.values(foreigns)) {
-						result.push(to);
+			function treeStep(data: A[]) {
+				for (const item of data) {
+					const nextResult = forward([item]);
+					if (nextResult.length) {
+						alls.push(item as any);
+						nodes.push(item as any);
+						treeStep(nextResult as any);
+					} else {
+						alls.push(item as any);
+						leafs.push(item as any);
 					}
 				}
 			}
-			data = result as any;
+		} else {
+			return forward(data);
 		}
-		if (!_tree) return result as B[];
-
-		const alls = [] as B[];
-		const nodes = [] as B[];
-		const leafs = [] as B[];
-		for (const item of result){
-			const nextResult = map(item as any);
-			if (nextResult.length) {
-				alls.push(item);
-				alls.push(...nextResult);
-				nodes.push(item);
-				leafs.push(...nextResult);
-			} else {
-				alls.push(item);
-				leafs.push(item);
-			}
-		}
-		if ('all' === _tree) return alls;
-		if ('leaf' === _tree) return leafs;
-		if ('node' === _tree) return nodes;
-		return []
 	}
+
+	function forward(data: A[]): B[] {
+		let idx = rules.length;
+
+		while (--idx) {
+			const rule = rules[idx];
+			const bind = binds[idx];
+			// rule === [A, toFK, (toPK)]
+			// bind === [key][1][id][number]
+			data = mapStep(data, bind, rule, 2, 1);
+		}
+		return data as any;
+	}
+
+	function backward(data: A[]): B[] {
+		const tail = rules.length;
+		let idx = 0;
+
+		while (++idx < tail) {
+			const rule = rules[idx];
+			const bind = binds[idx];
+			// rule === [A, (toFK), toPK]
+			// bind === [key][0][id][number]
+			data = mapStep(data, bind, rule, 1, 0);
+		}
+		return data as any;
+	}
+
+	function back() {}
 
 	function publish() {
 		// skip if stop.
@@ -639,7 +678,7 @@ function relationWritable<A, B>(binds: ForeignsList<B>, rules: RelArgs<B>, _tree
 	}
 
 	function to<C>(...args: RelArg<C>) {
-		return relationWritable<A, C>([{}, ...binds] as ForeignsList<any>, [args, ...rules]);
+		return relationWritable<A, C>([{}, ...binds] as ForeignsList<any>, [args, ...rules], _tree);
 	}
 
 	function order(newSort: IOrder<B> | undefined, key = undefined) {
@@ -659,11 +698,7 @@ function relationWritable<A, B>(binds: ForeignsList<B>, rules: RelArgs<B>, _tree
 		}
 	) {
 		setKey(mapper, key);
-		return writableReduce<B, R, TOOL>(entagle(), mapper, customTools);
-	}
-
-	function entagle(): Entagle<B> {
-		return [finder, children, baseIdx, list, find, query];
+		return writableReduce<B, R, TOOL>(rule[0].entagle(), mapper, customTools);
 	}
 
 	// Readable section.
@@ -689,4 +724,29 @@ function relationWritable<A, B>(binds: ForeignsList<B>, rules: RelArgs<B>, _tree
 			}
 		};
 	}
+}
+
+function mapStep<A, B>(
+	data: A[],
+	bind: Foreigns<any, any>,
+	rule: RelArg<any>,
+	keyIdx: 1 | 2,
+	side: 0 | 1
+) {
+	const result: B[] = [];
+	for (const item of data as any as B[]) {
+		if (!item) continue;
+
+		for (const key of rule[keyIdx]!(item)) {
+			if (undefined === key) continue;
+
+			const foreigns = bind[key as string]?.[side];
+			if (!foreigns) continue;
+
+			for (const to of Object.values(foreigns)) {
+				result.push(to);
+			}
+		}
+	}
+	return result;
 }
